@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>P2P Pong — Super Simple UI</title>
+  <style>
+    :root { --bg:#0b0f14; --panel:#121821; --ink:#e6eefc; --muted:#9fb3cb; --accent:#5eead4; --bad:#fca5a5; }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Helvetica,Arial;color:var(--ink);background:#0b0f14;display:grid;place-items:center;min-height:100vh;padding:16px}
+    .app{width:min(900px,100%);display:grid;gap:14px}
+    .card{background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    h1{margin:0 0 6px 0}
+    p{color:var(--muted);margin:.25rem 0}
+    textarea{width:100%;min-height:110px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:#0f1420;color:var(--ink);padding:10px}
+    button{cursor:pointer;border:none;border-radius:12px;padding:10px 14px;font-weight:700;color:#05121a}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .primary{background:var(--accent)}
+    .danger{background:var(--bad)}
+    .pill{display:inline-block;border:1px solid rgba(255,255,255,.12);background:#0f1420;border-radius:999px;padding:6px 10px;color:var(--muted);font-size:12px}
+    .grid{display:grid;gap:10px}
+    canvas{width:100%;height:auto;background:linear-gradient(180deg,#0d1320 0%,#0a0f1a 100%);border-radius:16px;border:1px solid rgba(255,255,255,.08)}
+    .kbd{padding:2px 6px;border-radius:6px;background:#0c1420;border:1px solid rgba(255,255,255,.1);font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="card">
+      <h1>🕹️ P2P Pong</h1>
+      <p>Two browsers connect directly with WebRTC (no game server)</p>
+      <div class="row">
+        <span class="pill" id="status">State: new</span>
+        <span class="pill" id="role">Role: —</span>
+      </div>
+      <canvas id="game" width="900" height="540"></canvas>
+      <p>Controls — Host/Left: <span class="kbd">W</span>/<span class="kbd">S</span> • Guest/Right: <span class="kbd">↑</span>/<span class="kbd">↓</span></p>
+    </section>
+
+    <section class="card">
+      <h2>Connect</h2>
+      <div class="grid">
+        <div class="row">
+          <button id="btnHost" class="primary">I'm the Host (Left)</button>
+          <button id="btnGuest" class="primary">I'm the Guest (Right)</button>
+          <button id="btnReset" class="danger">Reset</button>
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--muted)">Copy this and send to your partner</label>
+          <textarea id="localSDP" readonly></textarea>
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--muted)">Paste what they sent you, then click <strong>Apply</strong></label>
+          <textarea id="remoteSDP" placeholder="Paste remote offer/answer here…"></textarea>
+        </div>
+        <div class="row">
+          <button id="btnApply" class="primary">Apply</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted)">Tip: We auto-copy your local text when it changes (if the browser allows).</p>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    // Simplified WebRTC + Pong
+    const ui = {
+      status: document.getElementById('status'),
+      role: document.getElementById('role'),
+      localSDP: document.getElementById('localSDP'),
+      remoteSDP: document.getElementById('remoteSDP'),
+      btnHost: document.getElementById('btnHost'),
+      btnGuest: document.getElementById('btnGuest'),
+      btnApply: document.getElementById('btnApply'),
+      btnReset: document.getElementById('btnReset'),
+      canvas: document.getElementById('game'),
+      ctx: document.getElementById('game').getContext('2d'),
+    };
+
+    const W = ui.canvas.width, H = ui.canvas.height;
+    const PADDLE_W = 14, PADDLE_H = 100, PADDLE_SPEED = 6;
+    const BALL_SIZE = 12, BALL_SPEED = 6;
+
+    let pc, dc, isHost = null, connected = false;
+
+    function setStatus(t){ ui.status.textContent = 'State: ' + t; }
+    function setRole(t){ ui.role.textContent = 'Role: ' + t; }
+
+    function newPeer(){
+      pc = new RTCPeerConnection({ iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] });
+      pc.onconnectionstatechange = () => setStatus(pc.connectionState);
+      pc.onicegatheringstatechange = () => updateLocalBox();
+      pc.onicecandidate = () => updateLocalBox();
+      pc.ondatachannel = (e)=>{ dc = e.channel; wireDC(); };
+    }
+
+    function wireDC(){
+      dc.onopen = ()=>{ connected = true; setStatus('connected'); startGame(); };
+      dc.onclose = ()=>{ connected = false; setStatus('closed'); };
+      dc.onmessage = (e)=> onNetMessage(e.data);
+    }
+
+    async function copyLocal(){
+      try { await navigator.clipboard.writeText(ui.localSDP.value); } catch {}
+    }
+    function updateLocalBox(){ if (pc?.localDescription) { ui.localSDP.value = JSON.stringify(pc.localDescription); copyLocal(); } }
+
+    ui.btnHost.onclick = async () => {
+      isHost = true; setRole('Host (Left)');
+      resetPeer(); newPeer();
+      dc = pc.createDataChannel('game'); wireDC();
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      updateLocalBox();
+    };
+
+    ui.btnGuest.onclick = async () => {
+      isHost = false; setRole('Guest (Right)');
+      resetPeer(); newPeer();
+      try {
+        const remote = JSON.parse(ui.remoteSDP.value.trim());
+        await pc.setRemoteDescription(remote);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        updateLocalBox();
+      } catch { alert('Paste the host\'s text first.'); }
+    };
+
+    ui.btnApply.onclick = async () => {
+      if (!pc) return;
+      try {
+        const remote = JSON.parse(ui.remoteSDP.value.trim());
+        await pc.setRemoteDescription(remote);
+        setStatus('remote set');
+      } catch { alert('That doesn\'t look like valid SDP JSON.'); }
+    };
+
+    ui.btnReset.onclick = ()=> location.reload();
+
+    function resetPeer(){ try { pc && pc.close(); } catch {} pc=null; dc=null; connected=false; setStatus('new'); }
+
+    // Game state & loop (host authoritative)
+    const state = { ballX:W/2, ballY:H/2, ballVX:BALL_SPEED, ballVY:BALL_SPEED*0.6, lpY:H/2-50, rpY:H/2-50, lScore:0, rScore:0 };
+    const input = { up:false, down:false };
+
+    window.addEventListener('keydown', e => {
+      if (isHost===true) { if (e.key==='w') input.up=true; if (e.key==='s') input.down=true; }
+      if (isHost===false){ if (e.key==='ArrowUp') input.up=true; if (e.key==='ArrowDown') input.down=true; }
+      sendInput();
+    });
+    window.addEventListener('keyup', e => {
+      if (isHost===true) { if (e.key==='w') input.up=false; if (e.key==='s') input.down=false; }
+      if (isHost===false){ if (e.key==='ArrowUp') input.up=false; if (e.key==='ArrowDown') input.down=false; }
+      sendInput();
+    });
+
+    function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
+
+    function startGame(){
+      const FPS=60, NET_HZ=30; let acc=0, last=performance.now();
+      function tick(now){ const dt=(now-last)/1000; last=now; acc+=dt; while(acc>1/FPS){ step(1/FPS); acc-=1/FPS; } draw(); requestAnimationFrame(tick); }
+      requestAnimationFrame(tick);
+      setInterval(()=>{ if (connected && isHost) safeSend({t:'state', s:state}); }, 1000/NET_HZ);
+    }
+
+    function step(dt){
+      if (isHost){
+        if (input.up) state.lpY -= 6; if (input.down) state.lpY += 6; state.lpY = clamp(state.lpY,0,H-100);
+        state.ballX += state.ballVX; state.ballY += state.ballVY;
+        if (state.ballY<=0 || state.ballY+12>=H) state.ballVY *= -1;
+        if (state.ballX<=30 && state.ballX>=18 && state.ballY+12>=state.lpY && state.ballY<=state.lpY+100){ state.ballX=30; state.ballVX=Math.abs(state.ballVX)*1.03; state.ballVY += ((state.ballY+6)-(state.lpY+50))*0.05; }
+        if (state.ballX+12>=W-30 && state.ballX<=W-18 && state.ballY+12>=state.rpY && state.ballY<=state.rpY+100){ state.ballX=W-42; state.ballVX=-Math.abs(state.ballVX)*1.03; state.ballVY += ((state.ballY+6)-(state.rpY+50))*0.05; }
+        if (state.ballX < -12){ state.rScore++; resetBall(-1); }
+        if (state.ballX > W+12){ state.lScore++; resetBall(1); }
+      }
+    }
+
+    function resetBall(dir){ state.ballX=W/2-6; state.ballY=H/2-6; state.ballVX=BALL_SPEED*(dir|| (Math.random()<0.5?1:-1)); state.ballVY=BALL_SPEED*(Math.random()*1.2-0.6); }
+
+    function draw(){
+      const ctx = ui.ctx; ctx.clearRect(0,0,W,H);
+      ctx.globalAlpha=.2; ctx.fillStyle='#9fb3cb'; for(let y=0;y<H;y+=24) ctx.fillRect(W/2-2,y,4,12); ctx.globalAlpha=1;
+      ctx.fillStyle='#e6eefc';
+      ctx.fillRect(20, state.lpY, 14, 100);
+      ctx.fillRect(W-34, state.rpY, 14, 100);
+      ctx.fillRect(state.ballX, state.ballY, 12, 12);
+      ctx.font='48px ui-monospace,monospace'; ctx.textAlign='center'; ctx.fillStyle='#5eead4'; ctx.fillText(state.lScore, W/2-60, 60); ctx.fillText(state.rScore, W/2+60, 60);
+      ctx.font='14px system-ui'; ctx.textAlign='left'; ctx.fillStyle='#9fb3cb';
+      ctx.fillText('Role: ' + (isHost===true?'Host (Left)': isHost===false?'Guest (Right)':'— choose above —'), 16, H-16);
+    }
+
+    function sendInput(){ if (!connected || !dc || dc.readyState!=='open') return; if (isHost===true){ safeSend({t:'input', who:'L', up:!!input.up, down:!!input.down}); } else if (isHost===false){ safeSend({t:'input', who:'R', up:!!input.up, down:!!input.down}); } }
+
+    function onNetMessage(raw){ try { const msg = JSON.parse(raw); if (msg.t==='state' && isHost===false) Object.assign(state,msg.s); else if (msg.t==='input' && isHost===true && msg.who==='R'){ if (msg.up) state.rpY-=6; if (msg.down) state.rpY+=6; state.rpY = clamp(state.rpY,0,H-100);} } catch {} }
+
+    function safeSend(obj){ try { dc && dc.readyState==='open' && dc.send(JSON.stringify(obj)); } catch {} }
+  </script>
+</body>
+</html>
